@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>四旋翼回放</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #eef0f1;
+               font: 13px/1.5 system-ui, sans-serif; color: #1c2024; }
+  #hud { position: fixed; left: 12px; top: 12px; padding: 8px 10px; white-space: pre;
+         background: rgba(255,255,255,.92); border: 1px solid #cfd4d8; border-radius: 4px;
+         font-variant-numeric: tabular-nums; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 10px;
+         align-items: center; padding: 8px 12px; background: rgba(255,255,255,.94);
+         border-top: 1px solid #cfd4d8; }
+  #scrub { flex: 1; }
+  button, select { font: inherit; padding: 2px 10px; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="bar">
+  <button id="play">暂停</button>
+  <input id="scrub" type="range" min="0" max="1" step="0.001" value="0">
+  <label>速度
+    <select id="speed">
+      <option value="0.25">0.25×</option>
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+    </select>
+  </label>
+  <label><input id="follow" type="checkbox"> 镜头跟随</label>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const D = /*DATA*/;
+const N = D.pos.length, T_END = (N - 1) * D.dt;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0xeef0f1);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 50);
+camera.up.set(0, 0, 1);                       // 世界系 z 向上,与仿真一致
+camera.position.set(1.5, -1.9, 1.7);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0.8);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x9aa3ab, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+sun.position.set(1, -2, 4);
+scene.add(sun);
+
+const grid = new THREE.GridHelper(4, 16, 0x8a939b, 0xc5cbd0);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+scene.add(new THREE.AxesHelper(0.3));        // 红 x、绿 y、蓝 z
+
+// 机体(为了看得清,按 D.scale 放大显示)
+const drone = new THREE.Group();
+const dark = new THREE.MeshStandardMaterial({ color: 0x2b3238 });
+const thrustBars = [];
+if (D.model) {
+  // 机架模型(mech/model.py 的零件清单):薄板按轮廓拉伸,其余是长方体和圆柱
+  D.model.forEach(p => {
+    let geo;
+    if (p.shape === 'plate') {
+      const shape = new THREE.Shape(p.outline.map(q => new THREE.Vector2(q[0], q[1])));
+      geo = new THREE.ExtrudeGeometry(shape, { depth: p.size[0], bevelEnabled: false })
+        .translate(0, 0, -p.size[0] / 2);
+    } else if (p.shape === 'cyl') {
+      geo = new THREE.CylinderGeometry(p.size[0], p.size[0], p.size[1], 28).rotateX(Math.PI / 2);
+    } else {
+      geo = new THREE.BoxGeometry(p.size[0], p.size[1], p.size[2]);
+    }
+    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color: new THREE.Color(p.color), transparent: p.prop, opacity: p.prop ? 0.55 : 1 }));
+    if (p.shape === 'plate') mesh.position.set(0, 0, p.pos[2]);
+    else mesh.position.set(p.pos[0], p.pos[1], p.pos[2]);
+    drone.add(mesh);
+  });
+} else {
+  drone.add(new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.008), dark));
+}
+D.motor_xy.forEach(([x, y]) => {
+  if (!D.model) {
+    const len = Math.hypot(x, y);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(len, 0.005, 0.003), dark);
+    arm.position.set(x / 2, y / 2, 0);
+    arm.rotation.z = Math.atan2(y, x);
+    drone.add(arm);
+    const propGeo = new THREE.CylinderGeometry(0.023, 0.023, 0.002, 28).rotateX(Math.PI / 2);
+    const prop = new THREE.Mesh(propGeo, new THREE.MeshStandardMaterial({
+      color: x > 0 ? 0xd6332a : 0x59636b, transparent: true, opacity: 0.75 }));
+    prop.position.set(x, y, 0.008);             // 红色桨在机头一侧
+    drone.add(prop);
+  }
+  const barGeo = new THREE.CylinderGeometry(0.0015, 0.0015, 1, 6)
+    .rotateX(Math.PI / 2).translate(0, 0, 0.5);
+  const bar = new THREE.Mesh(barGeo, new THREE.MeshBasicMaterial({ color: 0x1f6fb4 }));
+  bar.position.set(x, y, D.model ? 0.012 : 0.009);
+  drone.add(bar);
+  thrustBars.push(bar);
+});
+drone.scale.setScalar(D.scale);
+scene.add(drone);
+
+const toPts = a => a.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+const refLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(toPts(D.ref)),
+  new THREE.LineDashedMaterial({ color: 0x7b858d, dashSize: 0.03, gapSize: 0.02 }));
+refLine.computeLineDistances();
+scene.add(refLine);
+const trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(toPts(D.pos)),
+  new THREE.LineBasicMaterial({ color: 0x1f6fb4 }));
+scene.add(trail);
+let estTrail = null;                          // 状态估计给出的轨迹(橙色)
+if (D.est) {
+  estTrail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(toPts(D.est)),
+    new THREE.LineBasicMaterial({ color: 0xe07b00 }));
+  scene.add(estTrail);
+}
+const target = new THREE.Mesh(new THREE.SphereGeometry(0.012, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xe07b00 }));
+scene.add(target);
+const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.05 * D.scale, 24),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.18 }));
+shadow.position.z = 0.001;
+scene.add(shadow);
+
+const hud = document.getElementById('hud'), scrub = document.getElementById('scrub');
+const playBtn = document.getElementById('play'), speedSel = document.getElementById('speed');
+const follow = document.getElementById('follow');
+let time = 0, playing = true, last = performance.now();
+
+function setPlaying(p) { playing = p; playBtn.textContent = p ? '暂停' : '播放'; }
+playBtn.onclick = () => setPlaying(!playing);
+scrub.oninput = () => { time = scrub.value * T_END; };
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); } });
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+
+const qa = new THREE.Quaternion(), qb = new THREE.Quaternion();
+const lerp = (a, b, s) => a + (b - a) * s;
+
+function show(t) {
+  const f = Math.min(t / D.dt, N - 1), i = Math.floor(f), j = Math.min(i + 1, N - 1), s = f - i;
+  const p = [0, 1, 2].map(k => lerp(D.pos[i][k], D.pos[j][k], s));
+  const r = [0, 1, 2].map(k => lerp(D.ref[i][k], D.ref[j][k], s));
+  drone.position.set(p[0], p[1], p[2]);
+  qa.set(D.quat[i][1], D.quat[i][2], D.quat[i][3], D.quat[i][0]);   // 数据是 wxyz
+  qb.set(D.quat[j][1], D.quat[j][2], D.quat[j][3], D.quat[j][0]);
+  drone.quaternion.copy(qa).slerp(qb, s);
+  thrustBars.forEach((b, k) => { b.scale.z = Math.max(1e-4, 0.08 * lerp(D.thrust[i][k], D.thrust[j][k], s)); });
+  target.position.set(r[0], r[1], r[2]);
+  shadow.position.x = p[0]; shadow.position.y = p[1];
+  trail.geometry.setDrawRange(0, i + 1);
+  if (estTrail) estTrail.geometry.setDrawRange(0, i + 1);
+  if (follow.checked) {
+    const d = new THREE.Vector3(p[0], p[1], p[2]).sub(controls.target);
+    controls.target.add(d); camera.position.add(d);
+  }
+  const up = new THREE.Vector3(0, 0, 1).applyQuaternion(drone.quaternion);
+  const tilt = Math.acos(Math.min(1, up.z)) * 180 / Math.PI;
+  const err = Math.hypot(p[0] - r[0], p[1] - r[1], p[2] - r[2]) * 100;
+  const n = v => v.toFixed(2).padStart(6);
+  hud.textContent =
+    `t      ${t.toFixed(2).padStart(6)} s\n` +
+    `位置   ${n(p[0])} ${n(p[1])} ${n(p[2])} m\n` +
+    `误差   ${err.toFixed(1).padStart(6)} cm\n` +
+    `倾角   ${tilt.toFixed(1).padStart(6)} °\n` +
+    (D.est ? `估计差 ${(Math.hypot(D.est[i][0] - p[0], D.est[i][1] - p[1], D.est[i][2] - p[2]) * 100).toFixed(1).padStart(6)} cm\n` : '') +
+    `机体放大 ${D.scale}× 显示,蓝柱为各电机推力\n` +
+    `虚线 参考 · 蓝线 实际` + (D.est ? ` · 橙线 估计` : '');
+}
+
+function frame(now) {
+  const dtReal = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  if (playing) {
+    time += dtReal * parseFloat(speedSel.value);
+    if (time > T_END) time = 0;
+    scrub.value = time / T_END;
+  }
+  show(time);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

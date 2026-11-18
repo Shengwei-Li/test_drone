@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/_tmp_policy.npz
+
+# 生成的输出(可由脚本重新生成)
+out/
+firmware/build/
+
+# KiCad 本地文件
+*.kicad_prl
+*-backups/
+fp-info-cache
+*.lck
+~*.lck
+
+# KiCad 10 的本地历史记录(它自己是一个 git 仓库)
+.history/

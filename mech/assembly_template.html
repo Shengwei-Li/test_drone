@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>整机装配</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #eef0f2; font-family: system-ui, sans-serif; }
+  #hud { position: absolute; left: 12px; top: 12px; background: rgba(255,255,255,.92); padding: 10px 14px;
+         border-radius: 6px; font-size: 14px; line-height: 1.7; color: #20262b; }
+  #hud label { display: block; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>整机装配</b>(拖动旋转,滚轮缩放)<br>
+  <label><input type="checkbox" id="props" checked> 桨</label>
+  <label><input type="checkbox" id="mounts" checked> 电机座和电机</label>
+  <label><input type="checkbox" id="batt" checked> 电池和光流子板</label>
+  <label><input type="checkbox" id="explode"> 爆炸视图</label>
+  <span id="status">正在加载 PCB 模型…</span>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script>
+const D = /*DATA*/;
+THREE.Object3D.DefaultUp.set(0, 0, 1);                     // 机体系 z 向上
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 1, 2000);
+camera.position.set(-110, -120, 95);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0xeef0f2);
+document.body.appendChild(renderer.domElement);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a939b, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.7);
+sun.position.set(-60, -80, 150);
+scene.add(sun);
+scene.add(new THREE.AxesHelper(30));                        // 红 x(前)、绿 y(左)、蓝 z(上)
+
+const groups = { pcb: new THREE.Group(), mounts: new THREE.Group(), props: new THREE.Group(), batt: new THREE.Group() };
+Object.values(groups).forEach(g => scene.add(g));
+
+// 电机座(网格)、电机(圆柱)、桨(半透明圆盘)
+const mountGeo = new THREE.BufferGeometry();
+mountGeo.setAttribute('position', new THREE.Float32BufferAttribute(D.mount.flat(), 3));
+mountGeo.computeVertexNormals();
+const mountMat = new THREE.MeshStandardMaterial({ color: 0x2a2f35, flatShading: true });
+D.mounts.forEach((m, i) => {
+  const g = new THREE.Group();
+  g.position.set(m.pos[0], m.pos[1], 0);
+  g.rotation.z = m.rot;
+  g.add(new THREE.Mesh(mountGeo, mountMat));
+  const motor = new THREE.Mesh(new THREE.CylinderGeometry(D.motor.r, D.motor.r, D.motor.len, 32).rotateX(Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0xb8bec4, metalness: 0.6, roughness: 0.4 }));
+  motor.position.z = D.motor.z0 + D.motor.len / 2;
+  g.add(motor);
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 4, 12).rotateX(Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x8a939b }));
+  shaft.position.z = D.motor.z0 + D.motor.len + 2;
+  g.add(shaft);
+  groups.mounts.add(g);
+  const prop = new THREE.Mesh(new THREE.CylinderGeometry(D.prop.r, D.prop.r, 1, 48).rotateX(Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: m.pos[0] > 0 ? 0xd6332a : 0x59636b, transparent: true, opacity: 0.35 }));
+  prop.position.set(m.pos[0], m.pos[1], D.prop.z);
+  groups.props.add(prop);
+});
+// 电池、光流子板
+const batt = new THREE.Mesh(new THREE.BoxGeometry(...D.battery.size), new THREE.MeshStandardMaterial({ color: 0xc9ced3 }));
+batt.position.set(D.battery.x, 0, D.battery.z);
+groups.batt.add(batt);
+const flow = new THREE.Mesh(new THREE.BoxGeometry(...D.flow.size), new THREE.MeshStandardMaterial({ color: 0x3a4a8a }));
+flow.position.set(D.flow.x, 0, D.flow.z);
+groups.batt.add(flow);
+// 地面(脚底的高度)
+const ground = new THREE.Mesh(new THREE.CircleGeometry(90, 48),
+  new THREE.MeshBasicMaterial({ color: 0xd9dde1, transparent: true, opacity: 0.6, side: THREE.DoubleSide }));
+ground.position.z = D.foot_z;
+scene.add(ground);
+
+// PCB:KiCad 导出的 glTF 是 y 向上、单位 m。转成机体系:z 向上、x 向前。
+new THREE.GLTFLoader().load('fc_v1.glb', gltf => {
+  const m = gltf.scene;
+  m.scale.setScalar(1000);
+  m.rotation.set(Math.PI / 2, PCB_YAW, 0);
+  groups.pcb.add(m);
+  window.pcbModel = m;
+  document.getElementById('status').textContent = '';
+}, undefined, e => { document.getElementById('status').textContent = 'PCB 模型加载失败(需要通过本地服务器打开)'; });
+var PCB_YAW = -Math.PI / 2;                             // 实测:这样转后无线模块在 +x(机头)一侧
+
+function apply() {
+  groups.props.visible = document.getElementById('props').checked;
+  groups.mounts.visible = document.getElementById('mounts').checked;
+  groups.batt.visible = document.getElementById('batt').checked;
+  const ex = document.getElementById('explode').checked;
+  groups.props.position.z = ex ? 18 : 0;
+  groups.batt.position.z = ex ? -14 : 0;
+  groups.mounts.children.forEach((g, i) => {
+    const m = D.mounts[i], n = Math.hypot(m.pos[0], m.pos[1]);
+    g.position.set(m.pos[0] * (ex ? 1 + 12 / n : 1), m.pos[1] * (ex ? 1 + 12 / n : 1), 0);
+  });
+}
+['props', 'mounts', 'batt', 'explode'].forEach(id => document.getElementById(id).onchange = apply);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>
